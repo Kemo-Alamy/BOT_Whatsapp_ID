@@ -5,9 +5,7 @@ const path = require('path');
 
 // ===================== الإعدادات =====================
 const TELEGRAM_TOKEN = '8602061556:AAHbEZSeHEq2eREjQqBfceuqgVPvmxHsYqE';
-const OWNER_ID = 6520549428; // ضع الأيدي بتاعك هنا
 const OWNER_NAME = 'Kemo King';
-const SECRET_CODE = 'KEMO KING';
 // ====================================================
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
@@ -15,8 +13,7 @@ const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 let whatsappClient = null;
 let isConnected = false;
 let connectedUsers = new Set();
-let waitingForPhone = new Map(); // chatId => true
-let waitingForCode = new Map();  // chatId => true
+let waitingForPhone = new Map(); // chatId => userId
 
 // ===================== ملف الترحيب =====================
 function getWelcomeFile() {
@@ -93,13 +90,20 @@ bot.on('callback_query', async (query) => {
 
   // ---- Connect ----
   if (query.data === 'connect') {
-    await bot.sendMessage(chatId, `
-🔐 *أدخل كود الاتصال:*
+    if (isConnected) {
+      await bot.sendMessage(chatId, '⚠️ *الواتساب متصل بالفعل!*\nاضغط Disconnect الأول.', { parse_mode: 'Markdown' });
+      return;
+    }
 
-اكتب الكود اللي عندك عشان تربط الواتساب.
+    await bot.sendMessage(chatId, `
+📱 *ادخل رقم واتساب بتاعك:*
+
+اكتب الرقم مع كود الدولة بدون + أو مسافات
+
+مثال: \`201012345678\`
 `, { parse_mode: 'Markdown' });
 
-    waitingForCode.set(chatId, { userId });
+    waitingForPhone.set(chatId, userId);
   }
 
   // ---- Disconnect ----
@@ -110,7 +114,6 @@ bot.on('callback_query', async (query) => {
       isConnected = false;
       connectedUsers.delete(userId);
       waitingForPhone.delete(chatId);
-      waitingForCode.delete(chatId);
       await bot.sendMessage(chatId, '🔴 *تم قطع الاتصال بالواتساب.*', { parse_mode: 'Markdown' });
     } else {
       await bot.sendMessage(chatId, 'ℹ️ الواتساب مش متصل أصلاً.', { parse_mode: 'Markdown' });
@@ -118,53 +121,28 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-// ===================== استقبال الرسائل النصية =====================
+// ===================== استقبال رقم الهاتف =====================
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
 
   if (!text || text.startsWith('/')) return;
+  if (!waitingForPhone.has(chatId)) return;
 
-  // --- انتظار كود الاتصال السري ---
-  if (waitingForCode.has(chatId)) {
-    const { userId } = waitingForCode.get(chatId);
-    waitingForCode.delete(chatId);
+  const userId = waitingForPhone.get(chatId);
+  waitingForPhone.delete(chatId);
 
-    if (text.trim() === SECRET_CODE) {
-      await bot.sendMessage(chatId, `
-✅ *الكود صح!*
-
-📱 *ادخل رقم واتساب بتاعك:*
-اكتب الرقم مع كود الدولة بدون + أو مسافات
-
-مثال: \`201012345678\`
-`, { parse_mode: 'Markdown' });
-
-      waitingForPhone.set(chatId, { userId });
-    } else {
-      await bot.sendMessage(chatId, '❌ *الكود غلط!* جرب تاني من /menu', { parse_mode: 'Markdown' });
-    }
+  const phone = text.trim().replace(/[^0-9]/g, '');
+  if (phone.length < 10) {
+    await bot.sendMessage(chatId, '❌ *رقم غلط!* ادخل الرقم صح مع كود الدولة.\n\nمثال: `201012345678`', { parse_mode: 'Markdown' });
     return;
   }
 
-  // --- انتظار رقم الهاتف ---
-  if (waitingForPhone.has(chatId)) {
-    const { userId } = waitingForPhone.get(chatId);
-    waitingForPhone.delete(chatId);
-
-    const phone = text.trim().replace(/[^0-9]/g, '');
-    if (phone.length < 10) {
-      await bot.sendMessage(chatId, '❌ *رقم غلط!* ادخل الرقم صح مع كود الدولة.', { parse_mode: 'Markdown' });
-      return;
-    }
-
-    await bot.sendMessage(chatId, '⏳ *جاري الاتصال بالواتساب...*', { parse_mode: 'Markdown' });
-    await startWhatsApp(chatId, userId, phone);
-    return;
-  }
+  await bot.sendMessage(chatId, '⏳ *جاري إرسال طلب الربط لسيرفرات واتساب...*', { parse_mode: 'Markdown' });
+  await startWhatsApp(chatId, userId, phone);
 });
 
-// ===================== تشغيل WhatsApp بالرقم =====================
+// ===================== تشغيل WhatsApp =====================
 async function startWhatsApp(chatId, userId, phoneNumber) {
   try {
     whatsappClient = new Client({
@@ -184,44 +162,44 @@ async function startWhatsApp(chatId, userId, phoneNumber) {
       }
     });
 
-    // لما يكون جاهز لطلب الكود
+    // أول ما يجي QR نطلب Pairing Code بدله
     whatsappClient.on('qr', async () => {
-      // بنستخدم pairing code مش QR
       try {
+        // طلب كود الربط من سيرفرات واتساب
         const code = await whatsappClient.requestPairingCode(phoneNumber);
 
         // بعت الكود مع زرار نسخ
         await bot.sendMessage(chatId, `
-🔗 *كود ربط الواتساب*
+🔗 *تم إرسال الطلب لواتساب بنجاح!*
 
-📋 الكود بتاعك:
+📋 *كود الربط بتاعك:*
 \`${code}\`
 
 ━━━━━━━━━━━━━━━
 📱 *طريقة الاستخدام:*
-1️⃣ افتح واتساب
+1️⃣ افتح واتساب على تليفونك
 2️⃣ الإعدادات ← الأجهزة المرتبطة
 3️⃣ ربط جهاز ← ربط برقم الهاتف
 4️⃣ ادخل الكود اللي فوق
 ━━━━━━━━━━━━━━━
-⏰ _الكود صالح لمدة دقيقتين_
+⏰ _الكود صالح لمدة دقيقتين فقط_
 `, { parse_mode: 'Markdown' });
 
       } catch (err) {
         console.error('Pairing code error:', err.message);
-        await bot.sendMessage(chatId, `❌ *خطأ في طلب الكود:* ${err.message}`, { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, `❌ *فشل طلب الكود:* ${err.message}\n\nجرب تاني من /menu`, { parse_mode: 'Markdown' });
       }
     });
 
-    // لما يتصل
+    // لما يتصل بنجاح
     whatsappClient.on('ready', async () => {
       isConnected = true;
       connectedUsers.add(userId);
-      console.log('WhatsApp Connected!');
+      console.log('✅ WhatsApp Connected!');
 
-      await bot.sendMessage(chatId, '✅ *تم الاتصال بالواتساب بنجاح!*\n\nأي رسالة في مجموعاتك هتظهر هنا.', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '✅ *تم الاتصال بالواتساب بنجاح!*\n\nدلوقتي أي رسالة في مجموعاتك هتوصلك هنا.', { parse_mode: 'Markdown' });
 
-      // اجلب كل الجروبات
+      // جلب كل الجروبات
       try {
         const chats = await whatsappClient.getChats();
         const groups = chats.filter(c => c.isGroup);
@@ -231,26 +209,23 @@ async function startWhatsApp(chatId, userId, phoneNumber) {
           return;
         }
 
-        let groupsList = '📋 *مجموعاتك على الواتساب:*\n\n';
+        let groupsList = `📋 *مجموعاتك على الواتساب (${groups.length} جروب):*\n\n`;
         groups.forEach((g, i) => {
           groupsList += `${i + 1}. 👥 *${g.name}*\n   🆔 \`${g.id._serialized}\`\n\n`;
         });
 
         // لو الرسالة كبيرة، قسمها
-        if (groupsList.length > 4000) {
-          const chunks = groupsList.match(/.{1,4000}/gs);
-          for (const chunk of chunks) {
-            await bot.sendMessage(chatId, chunk, { parse_mode: 'Markdown' });
-          }
-        } else {
-          await bot.sendMessage(chatId, groupsList, { parse_mode: 'Markdown' });
+        const chunks = groupsList.match(/[\s\S]{1,4000}/g) || [];
+        for (const chunk of chunks) {
+          await bot.sendMessage(chatId, chunk, { parse_mode: 'Markdown' });
         }
+
       } catch (err) {
         console.error('Error fetching groups:', err.message);
       }
     });
 
-    // لما تيجي رسالة في أي جروب
+    // لما تيجي رسالة في جروب
     whatsappClient.on('message', async (message) => {
       try {
         const chat = await message.getChat();
@@ -261,7 +236,7 @@ async function startWhatsApp(chatId, userId, phoneNumber) {
 
         for (const uid of connectedUsers) {
           await bot.sendMessage(uid, `
-📨 *رسالة جديدة في جروب واتساب*
+📨 *رسالة جديدة في جروب*
 
 👥 *اسم الجروب:* ${groupName}
 🆔 *الأيدي:* \`${groupId}\`
@@ -280,9 +255,11 @@ async function startWhatsApp(chatId, userId, phoneNumber) {
       isConnected = false;
       console.log('WhatsApp Disconnected:', reason);
       for (const uid of connectedUsers) {
-        await bot.sendMessage(uid, `⚠️ *انقطع اتصال الواتساب*\nالسبب: ${reason}`, { parse_mode: 'Markdown' });
+        await bot.sendMessage(uid, `⚠️ *انقطع اتصال الواتساب*\nالسبب: ${reason}\n\nاضغط /menu عشان تتصل تاني.`, { parse_mode: 'Markdown' });
       }
       connectedUsers.clear();
+      whatsappClient = null;
+      isConnected = false;
     });
 
     await whatsappClient.initialize();
